@@ -1,0 +1,96 @@
+version: '3.8'
+
+services:
+  # ── PostgreSQL Database ─────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: edulingua-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-edulingua}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-edulingua_password}
+      POSTGRES_DB: ${POSTGRES_DB:-edulingua}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-edulingua} -d ${POSTGRES_DB:-edulingua}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - edulingua_net
+
+  # ── Redis Cache & Queue ─────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: edulingua-redis
+    restart: always
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - edulingua_net
+
+  # ── FastAPI Webhook & API Server ─────────────────────────
+  api:
+    build: .
+    container_name: edulingua-api
+    restart: always
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+    expose:
+      - "8000"
+    networks:
+      - edulingua_net
+
+  # ── Telegram Queue Worker ───────────────────────────────
+  worker:
+    build: .
+    container_name: edulingua-worker
+    restart: always
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python -m app.workers.worker_runner
+    networks:
+      - edulingua_net
+
+  # ── Reverse Proxy with Automatic HTTPS ──────────────────
+  caddy:
+    image: caddy:2-alpine
+    container_name: edulingua-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+    networks:
+      - edulingua_net
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  edulingua_net:
+    driver: bridge
